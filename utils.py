@@ -335,7 +335,15 @@ def pred_probs(args, model, prompt, output_ids, image, image_size):
         def custom_forward(input_ids, images, image_size):
             (inputs, _, _, _, inputs_embeds, labels, _) = model.prepare_inputs_labels_for_multimodal(input_ids, None, None, None, None, images, image_sizes=image_size)
             return inputs, inputs_embeds, labels
-        inputs, inputs_embeds, labels = checkpoint.checkpoint(custom_forward, prompt, image, image_size)
+        if torch.is_grad_enabled() and (
+            (isinstance(image, torch.Tensor) and image.requires_grad)
+            or (isinstance(image, list) and any(getattr(x, 'requires_grad', False) for x in image))
+        ):
+            inputs, inputs_embeds, labels = checkpoint.checkpoint(
+                custom_forward, prompt, image, image_size, use_reentrant=False,
+            )
+        else:
+            inputs, inputs_embeds, labels = custom_forward(prompt, image, image_size)
         position_ids = torch.arange(inputs_embeds.shape[1]).unsqueeze(0).to(inputs_embeds.device)
         attention_mask = torch.ones_like(position_ids).to(inputs_embeds.device)
         outputs = model(

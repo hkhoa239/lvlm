@@ -4,12 +4,20 @@ Helper function for the IGOS explanation methods.
 Modified from Tyler Lawson, Saeed khorram. https://github.com/saeed-khorram/IGOS
 """
 
+import logging
+import os
+import time
+
 import torch
 import torchvision.transforms as transforms
 import torch.nn.functional as F
 import math
 from torch.nn import UpsamplingBilinear2d
 from utils import pred_probs, DEVICE
+
+logger = logging.getLogger("igos.helper")
+# Set to "0" / "false" to silence the per-ig_iter trace inside interval_score.
+_LOG_INNER = os.environ.get("IGOS_LOG_INNER", "1").lower() not in ("0", "false", "")
 
 def cosine_decay(init, iter):
     return init * (1 + math.cos(math.pi * iter)) / 2
@@ -107,12 +115,16 @@ def interval_score(args, model, model_name, images, baseline, label, up_masks, n
         positions = torch.tensor(positions).to(input_ids.device)
 
         losses = torch.tensor(0.).to(input_ids.device)
-        for single_img in local_images:
+        n_steps = len(local_images)
+        for k, single_img in enumerate(local_images):
+            t0 = time.time()
             single_img = single_img.half()
             probs = pred_probs(args, model, input_ids, label, single_img, image_size)
             #losses += probs[positions].mean()
             losses += torch.log(probs)[positions].sum()
-    
+            if _LOG_INNER:
+                logger.info("    ig_iter %d/%d in %.2fs", k + 1, n_steps, time.time() - t0)
+
     elif model_name == 'cambrian':
         # The intervals to approximate the integral over
         intervals = torch.linspace(1/num_iter, 1, num_iter, requires_grad=False).to(DEVICE).view(-1, 1, 1, 1)
@@ -128,11 +140,15 @@ def interval_score(args, model, model_name, images, baseline, label, up_masks, n
         positions = torch.tensor(positions).to(input_ids.device)
         losses = torch.tensor(0.).to(input_ids.device)
 
-        for single_img in local_images:
+        n_steps = len(local_images)
+        for k, single_img in enumerate(local_images):
+            t0 = time.time()
             single_img = [item.unsqueeze(0).half() for item in single_img]
             probs = pred_probs(args, model, input_ids, label, single_img, image_size)
             #losses += probs[positions].mean()
             losses += torch.log(probs)[positions].sum()
+            if _LOG_INNER:
+                logger.info("    ig_iter %d/%d in %.2fs", k + 1, n_steps, time.time() - t0)
 
     return losses / num_iter
 

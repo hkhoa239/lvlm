@@ -359,7 +359,7 @@ if __name__ == "__main__":
 
     for param in model.parameters():
         param.requires_grad = False
-    model.gradient_checkpointing = True
+    model.eval()
 
     logger.info("loading data from %s", args.data_path)
     data_load_start = time.time()
