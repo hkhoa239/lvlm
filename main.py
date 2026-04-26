@@ -357,6 +357,24 @@ if __name__ == "__main__":
     logger.info("model loaded in %.1fs | params=%.2fB | dtype=%s",
                 time.time() - model_load_start, n_params / 1e9, next(model.parameters()).dtype)
 
+    # Defensively report parameter device placement. If anything ends up on
+    # CPU/meta/disk the iGOS+ inner loop becomes unusable (see
+    # llava/model/builder.py docstring on device_map), so we want this LOUD.
+    dev_counts = {}
+    for p in model.parameters():
+        dev_counts[str(p.device)] = dev_counts.get(str(p.device), 0) + p.numel()
+    placement = ", ".join(f"{d}={n / 1e9:.2f}B" for d, n in dev_counts.items())
+    logger.info("parameter placement: %s", placement)
+    if any(d.startswith("cpu") or d == "meta" or d.startswith("disk") for d in dev_counts):
+        logger.warning(
+            "model has parameters off the GPU (%s). iGOS+ will be 20-40x slower than expected. "
+            "Pass device_map explicitly or check VRAM headroom.", placement,
+        )
+    if torch.cuda.is_available():
+        free, total = torch.cuda.mem_get_info()
+        logger.info("cuda mem: used=%.2fGB / total=%.2fGB",
+                    (total - free) / 1e9, total / 1e9)
+
     for param in model.parameters():
         param.requires_grad = False
     model.eval()

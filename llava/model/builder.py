@@ -23,22 +23,30 @@ from llava.model import *
 from llava.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 
 
-def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map="auto", device="cuda", use_flash_attn=False, **kwargs):
+def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map=None, device="cuda", use_flash_attn=False, **kwargs):
+    # Pin everything to a single device by default. Using accelerate's
+    # "auto" planner here silently spills layers to CPU RAM and disk
+    # (see ./offload/<repo>/), which makes every forward pass 20-40x
+    # slower -- catastrophic for iGOS+ which runs hundreds of
+    # forward+backward passes per keyword. Callers that genuinely
+    # want multi-GPU sharding can pass device_map explicitly.
+    if device_map is None:
+        device_map = {"": device}
     kwargs = {"device_map": device_map, **kwargs}
 
-    if device != "cuda":
-        kwargs['device_map'] = {"": device}
-
-    # Only nest the offload dir inside model_path when it is an actual local directory.
-    # Otherwise (HF Hub repo IDs like "liuhaotian/llava-v1.5-7b") creating that path
-    # would shadow the Hub repo and break AutoTokenizer.from_pretrained.
-    if isinstance(model_path, str) and os.path.isdir(model_path):
-        offload_folder = os.path.join(model_path, "offload")
-    else:
-        safe_name = model_path.replace("/", "_") if isinstance(model_path, str) else "model"
-        offload_folder = os.path.join("offload", safe_name)
-    os.makedirs(offload_folder, exist_ok=True)
-    kwargs['offload_folder'] = offload_folder
+    # Only set up an offload folder when the chosen device_map actually
+    # asks for offload. A single-device map ({"": "cuda"}) never offloads,
+    # and pointing offload_folder at the (Hub) model_path can shadow the
+    # remote repo and break AutoTokenizer.from_pretrained.
+    needs_offload = isinstance(device_map, str) and device_map == "auto"
+    if needs_offload:
+        if isinstance(model_path, str) and os.path.isdir(model_path):
+            offload_folder = os.path.join(model_path, "offload")
+        else:
+            safe_name = model_path.replace("/", "_") if isinstance(model_path, str) else "model"
+            offload_folder = os.path.join("offload", safe_name)
+        os.makedirs(offload_folder, exist_ok=True)
+        kwargs['offload_folder'] = offload_folder
 
     if load_8bit:
         # Newer transformers refuses `load_in_8bit` kwarg + `quantization_config`
