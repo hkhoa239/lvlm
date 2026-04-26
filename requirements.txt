@@ -1,0 +1,69 @@
+# LVLM_Interpretation runtime dependencies.
+# Verified working with Python 3.12 on macOS (Apple Silicon, MPS) and Linux/CUDA.
+# Pinned to versions exercised in the project venv.
+#
+# Install order:
+#   1. python -m venv venv && source venv/bin/activate
+#   2. pip install --upgrade pip
+#   3. pip install -r requirements.txt
+#   4. pip install -e .          # installs the local `llava` package (pyproject.toml)
+#
+# Notes:
+# - PyTorch wheels from PyPI ship with MPS support on Apple Silicon and with
+#   CUDA 12.x on Linux. No custom --index-url is required for either.
+# - flash-attn / mamba-ssm / causal-conv1d are intentionally omitted: they do
+#   not build on macOS, and the active llava+mmstar code path does not import
+#   them. Add them manually on a CUDA host if you need them.
+# - bitsandbytes only works on CUDA hosts. It is listed as commented out;
+#   uncomment it on Linux/CUDA if you want 4/8-bit quantization.
+
+# --- PyTorch (MPS on macOS, CUDA on Linux from default PyPI index) ---
+torch==2.11.0
+torchvision==0.26.0
+
+# --- HuggingFace stack ---
+transformers==4.46.3
+tokenizers==0.20.3
+accelerate==1.13.0
+peft==0.19.1
+huggingface_hub==0.36.2
+safetensors==0.7.0
+sentencepiece==0.2.1
+protobuf==7.34.1
+datasets==4.8.4
+pyarrow==24.0.0
+
+# --- LLaVA / Cambrian / MGM model dependencies ---
+einops==0.6.1
+einops-exts==0.0.4
+timm==1.0.26
+open_clip_torch==3.3.0
+diffusers==0.30.3
+ezcolorlog==1.0.3
+shortuuid==1.0.13
+markdown2==2.5.5
+pydantic==2.13.3
+scikit-learn==1.8.0
+httpx==0.24.0
+requests==2.33.1
+
+# --- Numerical / data ---
+numpy==2.4.4
+pandas==3.0.2
+scipy==1.17.1
+
+# --- Image / video / plotting ---
+pillow==12.2.0
+opencv-python==4.13.0.92
+matplotlib==3.10.9
+
+# --- Project-specific (keyword extraction for IGOS+) ---
+yake==0.7.3
+
+# --- Optional: 4/8-bit quantization (CUDA only) ---
+# bitsandbytes==0.49.2
+
+# --- Optional: training-only extras (not needed for inference / IGOS+) ---
+# deepspeed==0.12.6
+# wandb==0.26.1
+# ninja==1.13.0
