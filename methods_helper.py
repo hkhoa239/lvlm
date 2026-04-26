@@ -120,7 +120,10 @@ def interval_score(args, model, model_name, images, baseline, label, up_masks, n
             t0 = time.time()
             single_img = single_img.half()
             probs = pred_probs(args, model, input_ids, label, single_img, image_size)
-            #losses += probs[positions].mean()
+            # Defensive floor: log(0) = -inf -> NaN grad. pred_probs already
+            # upcasts to fp32 so this should rarely fire, but a tiny clamp is
+            # cheap insurance against pathological mask values.
+            probs = probs.clamp_min(1e-12)
             losses += torch.log(probs)[positions].sum()
             if _LOG_INNER:
                 logger.info("    ig_iter %d/%d in %.2fs", k + 1, n_steps, time.time() - t0)
@@ -145,7 +148,7 @@ def interval_score(args, model, model_name, images, baseline, label, up_masks, n
             t0 = time.time()
             single_img = [item.unsqueeze(0).half() for item in single_img]
             probs = pred_probs(args, model, input_ids, label, single_img, image_size)
-            #losses += probs[positions].mean()
+            probs = probs.clamp_min(1e-12)
             losses += torch.log(probs)[positions].sum()
             if _LOG_INNER:
                 logger.info("    ig_iter %d/%d in %.2fs", k + 1, n_steps, time.time() - t0)

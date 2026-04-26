@@ -129,6 +129,19 @@ def iGOS_pp(
         total_grads1 += masks_del.grad.clone()
         total_grads2 += masks_ins.grad.clone()
 
+        # Same NaN/Inf guard as iGOS_p: a single bad entry would be amplified
+        # by NAG momentum across every following iteration.
+        nonfinite = int((~torch.isfinite(total_grads1)).sum().item()
+                       + (~torch.isfinite(total_grads2)).sum().item())
+        if nonfinite:
+            logger.warning(
+                "iGOS++ iter %d/%d: %d non-finite entries in total_grads, "
+                "skipping update for this step",
+                i + 1, iterations, nonfinite,
+            )
+            total_grads1 = torch.nan_to_num(total_grads1, nan=0.0, posinf=0.0, neginf=0.0)
+            total_grads2 = torch.nan_to_num(total_grads2, nan=0.0, posinf=0.0, neginf=0.0)
+
         if opt == 'LS':
             masks = torch.cat((masks_del.unsqueeze(1), masks_ins.unsqueeze(1)), 1)
             total_grads = torch.cat((total_grads1.unsqueeze(1), total_grads2.unsqueeze(1)), 1)
@@ -246,12 +259,25 @@ def iGOS_p(
         total_grads += masks.grad.clone()
         masks.grad.zero_()
 
+        # If something blew up (fp16 underflow -> log(0) -> NaN, or huge grad
+        # producing inf), don't move the mask: a single NaN entry would
+        # propagate through every future iteration via NAG momentum and lock
+        # the line search. Clip and warn instead.
+        nonfinite = (~torch.isfinite(total_grads)).sum().item()
+        if nonfinite:
+            logger.warning(
+                "iGOS+ iter %d/%d: %d non-finite entries in total_grads, "
+                "skipping update for this step",
+                i + 1, iterations, nonfinite,
+            )
+            total_grads = torch.nan_to_num(total_grads, nan=0.0, posinf=0.0, neginf=0.0)
+
         if opt == 'LS':
             lrs = line_search(masks, total_grads, loss_function, lr)
             masks.data -= total_grads * lrs
-        
+
         if opt == 'NAG':
-            e = i / (i + args.momentum) 
+            e = i / (i + args.momentum)
             cita_p = cita
             cita = masks.data - lr * total_grads
             masks.data = cita + e * (cita - cita_p)
@@ -262,11 +288,17 @@ def iGOS_p(
         losses_tv.append(loss_tv.item())
         losses_l2.append(loss_l2.item())
 
+        grad_norm = float(total_grads.detach().abs().mean().item())
         logger.info(
-            "iGOS+ iter %d/%d | lr=%.4f | del=%.4f ins=%.4f | l1=%.4f tv=%.4f l2=%.4f",
+            "iGOS+ iter %d/%d | lr=%.4f | del=%.4f ins=%.4f | l1=%.4f tv=%.4f l2=%.4f | "
+            "|grad|=%.2e mask[min/mean/max]=%.3f/%.3f/%.3f",
             i + 1, iterations, lr,
             float(loss_del), float(loss_ins),
             loss_l1.item(), loss_tv.item(), loss_l2.item(),
+            grad_norm,
+            float(masks.data.min().item()),
+            float(masks.data.mean().item()),
+            float(masks.data.max().item()),
         )
         masks.grad.zero_()
         masks.data.clamp_(0, 1)

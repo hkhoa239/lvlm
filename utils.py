@@ -410,8 +410,13 @@ def pred_probs(args, model, prompt, output_ids, image, image_size):
         raise ValueError('Model not supported: {}'.format(args.model))
     logits = outputs['logits']
     #logits.requires_grad_(True)
-    logits_pred = logits[:,-output_ids.shape[-1]-1:-1,:]
-    probs_pred = F.softmax(logits_pred, dim=-1) # (1, len, 32000)
+    logits_pred = logits[:, -output_ids.shape[-1] - 1:-1, :]
+    # IMPORTANT: cast to fp32 before softmax. The model runs in fp16, so
+    # logits / softmax in fp16 makes any probability < ~6e-5 underflow to
+    # exactly 0. The IGOS+ optimizer then does torch.log(probs) -> -inf and
+    # backward through 1/x -> NaN gradients, which poisons the mask after a
+    # single bad step. fp32 has min positive ~1e-45 so this never underflows.
+    probs_pred = F.softmax(logits_pred.float(), dim=-1)  # (1, len, vocab)
     probs_pred = torch.gather(probs_pred, 2, output_ids.unsqueeze(-1)).squeeze()
     if probs_pred.dim() == 0:
         probs_pred = probs_pred.unsqueeze(0)
@@ -453,7 +458,9 @@ def find_keywords(args, model, input_ids, output_ids, image, blur_image, image_s
             probs = pred_probs(args, model, full_prompt, output_ids, image, image_size)
             probs_blur = pred_probs(args, model, full_prompt, output_ids, blur_image, image_size)
             # condition = (probs_blur <= 0.4*probs) & (~torch.isin(output_ids[0], torch.tensor(special_ids).to(probs.device)))
-            condition = (torch.log(probs)-torch.log(probs_blur) > 1.0)& (probs>=0.0) & (~torch.isin(output_ids[0], torch.tensor(special_ids).to(probs.device)))
+            log_probs = torch.log(probs.clamp_min(1e-12))
+            log_probs_blur = torch.log(probs_blur.clamp_min(1e-12))
+            condition = (log_probs - log_probs_blur > 1.0) & (probs >= 0.0) & (~torch.isin(output_ids[0], torch.tensor(special_ids).to(probs.device)))
             positions = torch.where(condition)[0].tolist()
             keywords = [tokenizer.decode(output_ids[0][idx]).strip() for idx in positions]
     
