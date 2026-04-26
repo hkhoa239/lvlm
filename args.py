@@ -172,4 +172,10 @@ def init_args():
     parser.add_argument("--ablation_zero", type=bool, default=False, help="Ablation of baseline image using all-zero images")
     parser.add_argument("--ablation_noise", type=bool, default=False, help="Ablation of baseline image using random noise")
 
+    # Quantization (CUDA only, requires bitsandbytes). Use --load_4bit on T4-class GPUs.
+    parser.add_argument("--load_4bit", action="store_true",
+                        help="Load the LLM in 4-bit (NF4) via bitsandbytes. ~4GB VRAM for llava-v1.5-7b.")
+    parser.add_argument("--load_8bit", action="store_true",
+                        help="Load the LLM in 8-bit via bitsandbytes. ~7GB VRAM for llava-v1.5-7b.")
+
     return parser.parse_args()

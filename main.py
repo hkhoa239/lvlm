@@ -4,6 +4,27 @@ main file to call the explanations methods and run experiments to generate salie
 Modified from Tyler Lawson, Saeed khorram. https://github.com/saeed-khorram/IGOS
 """
 
+# --- Triton 3.x / bitsandbytes 0.44.x compatibility shim ---------------------
+# bitsandbytes 0.44.x imports `triton.ops`, which Triton 3.x removed. The path
+# that uses it (int8 mixed-dequantize matmul) is NOT touched by the NF4 4-bit
+# kernels we use via `--load_4bit`, so stubbing the missing symbols is safe and
+# lets bitsandbytes import cleanly on Colab's Triton 3.x stack.
+# This MUST run before any (transitive) `import bitsandbytes`.
+import sys as _sys, types as _types
+try:
+    import triton as _triton  # noqa: F401
+    if 'triton.ops' not in _sys.modules:
+        _ops = _types.ModuleType('triton.ops')
+        _mpm = _types.ModuleType('triton.ops.matmul_perf_model')
+        _mpm.early_config_prune = lambda *a, **kw: None
+        _mpm.estimate_matmul_time = lambda *a, **kw: 0
+        _ops.matmul_perf_model = _mpm
+        _sys.modules['triton.ops'] = _ops
+        _sys.modules['triton.ops.matmul_perf_model'] = _mpm
+except ImportError:
+    pass
+# -----------------------------------------------------------------------------
+
 import torchvision.models as models
 from torch.autograd import Variable
 from datasets import load_dataset
@@ -27,17 +48,60 @@ from mgm.mm_utils import process_images_mgm
 import pandas as pd
 import cv2
 import json
+import logging
 import os
 import random
 import pickle
+import time
 from PIL import Image
 
 join = os.path.join
+
+LOG_FMT = "%(asctime)s | %(levelname)-7s | %(message)s"
+LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
+logger = logging.getLogger("igos")
+
+
+def _configure_stream_logging():
+    root = logging.getLogger()
+    if any(isinstance(h, logging.StreamHandler) and getattr(h, "_igos_stream", False)
+           for h in root.handlers):
+        return
+    root.setLevel(logging.INFO)
+    sh = logging.StreamHandler()
+    sh._igos_stream = True
+    sh.setFormatter(logging.Formatter(LOG_FMT, LOG_DATEFMT))
+    root.addHandler(sh)
+
+
+def _add_file_logging(out_dir):
+    log_path = os.path.join(out_dir, "run.log")
+    for h in logging.getLogger().handlers:
+        if isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", None) == os.path.abspath(log_path):
+            return log_path
+    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh.setFormatter(logging.Formatter(LOG_FMT, LOG_DATEFMT))
+    logging.getLogger().addHandler(fh)
+    return log_path
+
+
+def _format_eta(seconds):
+    seconds = max(0, int(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h{m:02d}m{s:02d}s"
+    if m:
+        return f"{m}m{s:02d}s"
+    return f"{s}s"
 
 def gen_explanations_llava(model, image_processor, data, args):
     setting = f'{args.method}_L1_{args.L1}_L2_{args.L2}_L3_{args.L3}_momentum_{args.momentum}_igiter_{args.ig_iter}_lr_{args.lr}_iter_{args.iterations}'
     out_dir = os.path.join(args.output_dir, setting)
     os.makedirs(out_dir, exist_ok=True)
+    log_path = _add_file_logging(out_dir)
+    logger.info("output dir: %s", out_dir)
+    logger.info("log file:   %s", log_path)
     with open(join(out_dir, 'args.json'), 'w') as f:
         json.dump(vars(args), f, indent=4)
 
@@ -48,14 +112,22 @@ def gen_explanations_llava(model, image_processor, data, args):
     else:
         raise ValueError("the method does not exist.")
 
+    n_data = len(data)
+    logger.info("starting explanation loop over %d samples (method=%s, model=%s)",
+                n_data, args.method, args.model)
+
     i_obj = 0
     total_del, total_ins, total_time = 0, 0, 0
     all_del_scores = []
     all_ins_scores = []
     save_list = []
-    for i_img in range(len(data)):
+    run_start = time.time()
+    for i_img in range(n_data):
+        sample_start = time.time()
+        idx_tag = f"[{i_img + 1}/{n_data}]"
         row = data[i_img]
         image, qs, cur_prompt = get_data(args, row)
+        logger.info("%s loaded image size=%s prompt=%r", idx_tag, image.size, cur_prompt[:120])
 
         image_size = [image.size]
         kernel_size = get_kernel_size(image.size)
@@ -104,15 +176,22 @@ def gen_explanations_llava(model, image_processor, data, args):
         prompt = conv.get_prompt()
         input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).to(model.device)
         
+        gen_start = time.time()
         output_ids = generate(args, model, input_ids, image_tensor, image_size)
         output_text = tokenizer.decode(output_ids[0])
+        logger.info("%s generated %d tokens in %.2fs | output=%r",
+                    idx_tag, output_ids.shape[-1], time.time() - gen_start, output_text[:200])
         # output_ids_blur = generate(args, model, input_ids, blur_tensor, image_size)
         # output_text_blur = tokenizer.decode(output_ids_blur[0])
         # # print('output text blurred:', output_text_blur)
-        positions, keywords = find_keywords(args, model, input_ids, output_ids, image_tensor, blur_tensor, 
+        kw_start = time.time()
+        positions, keywords = find_keywords(args, model, input_ids, output_ids, image_tensor, blur_tensor,
                                             image_size, output_text, tokenizer, args.use_yake)
-        
+        logger.info("%s detected %d keyword(s) in %.2fs: %s",
+                    idx_tag, len(positions), time.time() - kw_start, keywords[:10])
+
         if len(positions) == 0:
+            logger.warning("%s no keywords detected, skipping sample", idx_tag)
             continue
         # print('----------------')
         # print(cur_prompt)
@@ -131,10 +210,14 @@ def gen_explanations_llava(model, image_processor, data, args):
         pred_data = get_initial(pred_data, args.diverse_k, args.init_posi, 
                                 args.init_val, args.input_size, args.size)
 
+        n_labels = len(pred_data['labels'])
         for l_i, label in enumerate(pred_data['labels']):
         #for l_i, keyword in enumerate(pred_data['keywords']):
             label = label.unsqueeze(0)
             keyword = pred_data['keywords']
+            kw_tag = f"{idx_tag} kw {l_i + 1}/{n_labels}"
+            logger.info("%s starting %s | iterations=%d ig_iter=%d lr=%s",
+                        kw_tag, args.method, args.iterations, args.ig_iter, args.lr)
             now = time.time()
             masks, loss_del, loss_ins, loss_l1, loss_tv, loss_l2, loss_comb_del, loss_comb_ins = method(
                     args,
@@ -157,7 +240,9 @@ def gen_explanations_llava(model, image_processor, data, args):
                     positions=keyword,
                     resolution=resolution if args.model=='llava_next' else None
                 )
-            total_time += time.time() - now
+            method_dt = time.time() - now
+            total_time += method_dt
+            logger.info("%s %s done in %.2fs", kw_tag, args.method, method_dt)
 
             # Calculate the scores for the masks
             del_scores, ins_scores, del_curve, ins_curve, index = metric(
@@ -184,7 +269,6 @@ def gen_explanations_llava(model, image_processor, data, args):
             save_images(image_tensor, i_img, l_i, out_dir, classes, label, pred_data, text=cur_prompt)
             save_loss(loss_del, loss_ins, loss_l1, loss_tv, loss_l2, i_img, l_i, out_dir, loss_comb_del, loss_comb_ins)
 
-            # log info
             all_del_scores.append(del_scores.sum().item())
             all_ins_scores.append(ins_scores.sum().item())
             i_obj += 1
@@ -198,43 +282,87 @@ def gen_explanations_llava(model, image_processor, data, args):
                 f.write(f'Insertion (Avg.): {ins_scores.sum().item():.05f}' + '\n')
                 f.write(f'Time (Avg.): {total_time / i_obj:.03f}' + '\n')
 
-            eprint(
-                    f' Deletion (Avg.): {del_scores.sum().item():.05f}'
-                    f' Insertion (Avg.): {ins_scores.sum().item():.05f}'
-                    f' Time (Avg.): {total_time / i_obj:.03f}'
+            running_del = sum(all_del_scores) / len(all_del_scores)
+            running_ins = sum(all_ins_scores) / len(all_ins_scores)
+            logger.info(
+                "%s del=%.5f ins=%.5f | running mean del=%.5f ins=%.5f | mean t/kw=%.2fs (n=%d)",
+                kw_tag,
+                del_scores.sum().item(), ins_scores.sum().item(),
+                running_del, running_ins,
+                total_time / i_obj, i_obj,
             )
+
+        sample_dt = time.time() - sample_start
+        wall = time.time() - run_start
+        done = i_img + 1
+        eta = (wall / done) * (n_data - done) if done else 0.0
+        logger.info(
+            "%s sample done in %.2fs | wall=%s | ETA=%s",
+            idx_tag, sample_dt, _format_eta(wall), _format_eta(eta),
+        )
+
+    logger.info(
+        "run finished | %d samples processed | %d keyword runs | total wall=%s | mean t/kw=%.2fs",
+        n_data, i_obj, _format_eta(time.time() - run_start),
+        (total_time / i_obj) if i_obj else 0.0,
+    )
 
 
 if __name__ == "__main__":
 
     args = init_args()
-    eprint(f"args:\n {args}")
+    _configure_stream_logging()
+    logger.info("device=%s torch=%s cuda_available=%s",
+                DEVICE, torch.__version__, torch.cuda.is_available())
+    if torch.cuda.is_available():
+        try:
+            logger.info("gpu=%s", torch.cuda.get_device_name(0))
+        except Exception:
+            pass
+    logger.info("args:\n%s", json.dumps(vars(args), indent=2, default=str))
 
     torch.manual_seed(args.manual_seed)
     random.seed(args.manual_seed)
 
     disable_torch_init()
+    model_load_start = time.time()
     if args.model == 'cambrian':
         model_path = "nyu-visionx/cambrian-8b"
         model_name = get_model_name_from_path(model_path)
+        logger.info("loading cambrian model: %s", model_path)
         tokenizer, model, image_processor, context_len = load_pretrained_model_cambrian(model_path, args.model_base, model_name)
     elif args.model == 'llava':
         model_path = 'liuhaotian/llava-v1.5-7b'
         model_name = get_model_name_from_path(model_path)
+        logger.info("loading llava model: %s (4bit=%s, 8bit=%s)",
+                    model_path, args.load_4bit, args.load_8bit)
         tokenizer, model, image_processor, context_len = load_pretrained_model(
-            model_path, args.model_base, model_name, device=str(DEVICE))
+            model_path, args.model_base, model_name,
+            device=str(DEVICE),
+            load_4bit=args.load_4bit,
+            load_8bit=args.load_8bit,
+        )
     elif args.model == 'llava_next':
         model_path = "lmms-lab/llava-onevision-qwen2-72b-ov"
         model_name = get_model_name_from_path(model_path)
+        logger.info("loading llava_next model: %s", model_path)
         tokenizer, model, image_processor, context_len = load_pretrained_model_next(model_path, args.model_base, model_name, device_map='auto')
     elif args.model == 'mgm':
         model_path = 'mgm/work_dirs/mgm13bhd'
         model_name = get_model_name_from_path(model_path)
+        logger.info("loading mgm model: %s", model_path)
         tokenizer, model, image_processor, context_len = load_pretrained_model_mgm(model_path, args.model_base, model_name)
+
+    n_params = sum(p.numel() for p in model.parameters())
+    logger.info("model loaded in %.1fs | params=%.2fB | dtype=%s",
+                time.time() - model_load_start, n_params / 1e9, next(model.parameters()).dtype)
 
     for param in model.parameters():
         param.requires_grad = False
     model.gradient_checkpointing = True
+
+    logger.info("loading data from %s", args.data_path)
+    data_load_start = time.time()
     if args.data_path.endswith('csv'):
         df = pd.read_csv(args.data_path)
         data = df.to_dict(orient='records')
@@ -247,6 +375,6 @@ if __name__ == "__main__":
     else:
         data = load_dataset(args.data_path, "val")["val"].to_pandas()
         data = data.to_dict(orient="records")
+    logger.info("loaded %d samples in %.2fs", len(data), time.time() - data_load_start)
 
-    print('total number of data samples:', len(data))
     gen_explanations_llava(model, image_processor, data, args)

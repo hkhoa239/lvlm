@@ -4,9 +4,13 @@ Different explanation methods from the Integrated-Gradient Optimized Saliency ma
 Modified from Tyler Lawson, Saeed khorram. https://github.com/saeed-khorram/IGOS
 """
 
+import logging
+
 from torch.autograd import Variable
 from methods_helper import *
 from utils import DEVICE
+
+logger = logging.getLogger("igos.method")
 
 def iGOS_pp(
         args,
@@ -153,7 +157,13 @@ def iGOS_pp(
         losses_l1.append(loss_l1.item())
         losses_tv.append(loss_tv.item())
         losses_l2.append(loss_l2.item())
-        print(f'iteration: {i} lr: {lr:.4f} loss_comb_del: {loss_comb_del:.4f}, loss_comb_ins: {loss_comb_ins:.4f}, loss_del: {loss_del:.4f}, loss_ins: {loss_ins:.4f}, loss_l1: {loss_l1.item():.4f}, loss_tv: {loss_tv.item():.4f}, loss_l2: {loss_l2.item():.4f}')
+        logger.info(
+            "iGOS++ iter %d/%d | lr=%.4f | comb_del=%.4f comb_ins=%.4f del=%.4f ins=%.4f | l1=%.4f tv=%.4f l2=%.4f",
+            i + 1, iterations, lr,
+            float(loss_comb_del), float(loss_comb_ins),
+            float(loss_del), float(loss_ins),
+            loss_l1.item(), loss_tv.item(), loss_l2.item(),
+        )
 
     return masks_del * masks_ins, losses_del, losses_ins, losses_l1, losses_tv, losses_l2, losses_comb_del, losses_comb_ins
 
@@ -252,7 +262,12 @@ def iGOS_p(
         losses_tv.append(loss_tv.item())
         losses_l2.append(loss_l2.item())
 
-        print(f'iteration: {i} lr: {lr:.4f} loss_del: {loss_del:.4f}, loss_ins: {loss_ins:.4f}, loss_l1: {loss_l1.item():.4f}, loss_tv: {loss_tv.item():.4f}, loss_l2: {loss_l2.item():.4f}')
+        logger.info(
+            "iGOS+ iter %d/%d | lr=%.4f | del=%.4f ins=%.4f | l1=%.4f tv=%.4f l2=%.4f",
+            i + 1, iterations, lr,
+            float(loss_del), float(loss_ins),
+            loss_l1.item(), loss_tv.item(), loss_l2.item(),
+        )
         masks.grad.zero_()
         masks.data.clamp_(0, 1)
 
