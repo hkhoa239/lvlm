@@ -312,13 +312,28 @@ if __name__ == "__main__":
 
     args = init_args()
     _configure_stream_logging()
-    logger.info("device=%s torch=%s cuda_available=%s",
-                DEVICE, torch.__version__, torch.cuda.is_available())
+    logger.info("device=%s torch=%s cuda_available=%s cuda_compiled=%s",
+                DEVICE, torch.__version__, torch.cuda.is_available(), torch.version.cuda)
     if torch.cuda.is_available():
         try:
-            logger.info("gpu=%s", torch.cuda.get_device_name(0))
+            logger.info("gpu=%s (%d device(s))",
+                        torch.cuda.get_device_name(0), torch.cuda.device_count())
         except Exception:
             pass
+    else:
+        # iGOS+ runs hundreds of LLaVA forward+backward passes per keyword.
+        # On CPU each pass takes 30-60s, so even the 10-sample subset would
+        # run for ~12 hours. Refuse to start unless the user explicitly opts
+        # into the slow path.
+        if os.environ.get("IGOS_ALLOW_CPU", "").lower() not in ("1", "true", "yes"):
+            logger.error(
+                "CUDA is not available (torch.cuda.is_available()=False). "
+                "iGOS+ on a 7B LVLM is unusable on CPU. "
+                "Diagnose with: `python -c 'import torch; print(torch.__version__, torch.version.cuda)'` "
+                "and `nvidia-smi`. To force CPU anyway set IGOS_ALLOW_CPU=1."
+            )
+            sys.exit(2)
+        logger.warning("running on CPU because IGOS_ALLOW_CPU is set; expect ~12+ hours per keyword")
     logger.info("args:\n%s", json.dumps(vars(args), indent=2, default=str))
 
     torch.manual_seed(args.manual_seed)
