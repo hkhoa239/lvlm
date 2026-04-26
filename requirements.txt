@@ -1,25 +1,47 @@
 # LVLM_Interpretation runtime dependencies.
-# Verified working with Python 3.12 on macOS (Apple Silicon, MPS) and Linux/CUDA.
-# Pinned to versions exercised in the project venv.
+# Verified working with Python 3.12 on macOS (Apple Silicon, MPS) and
+# Linux + RTX 5090 (Blackwell, CUDA 12.8 via NVIDIA driver 555.xx-579.xx).
 #
 # Install order:
 #   1. python -m venv venv && source venv/bin/activate
 #   2. pip install --upgrade pip
 #   3. pip install -r requirements.txt
-#   4. pip install -e .          # installs the local `llava` package (pyproject.toml)
+#   4. pip install -e .       # installs the local `llava` package (pyproject.toml)
+#
+# Verify CUDA on Linux:
+#   python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+# Expected on a 5090 with the wheels below:
+#   2.11.0+cu128 True
 #
 # Notes:
-# - PyTorch wheels from PyPI ship with MPS support on Apple Silicon and with
-#   CUDA 12.x on Linux. No custom --index-url is required for either.
-# - flash-attn / mamba-ssm / causal-conv1d are intentionally omitted: they do
-#   not build on macOS, and the active llava+mmstar code path does not import
-#   them. Add them manually on a CUDA host if you need them.
-# - bitsandbytes only works on CUDA hosts. It is listed as commented out;
-#   uncomment it on Linux/CUDA if you want 4/8-bit quantization.
+# - PyPI's default torch==2.11.0 wheel is currently a +cu130 build, which
+#   needs NVIDIA driver >= 580.x. vast.ai 5090 instances usually run
+#   driver 555-575.x (max CUDA 12.9), so the cu130 wheel imports but
+#   torch.cuda.is_available() is False and the model silently runs on
+#   CPU (~12h per iGOS+ keyword). To avoid this trap, the Linux pin
+#   below forces the +cu128 local version, which is fetched from the
+#   pytorch.org index declared at the top of this file. macOS is
+#   unaffected -- it has no +cu* wheel and falls back to the default
+#   macOS wheel from PyPI.
+# - flash-attn / mamba-ssm / causal-conv1d are intentionally omitted:
+#   they don't build on macOS, and the active llava+mmstar code path
+#   does not import them. Add them manually on a CUDA host if you need
+#   them for cambrian / mgm.
+# - bitsandbytes only works on CUDA hosts. It is listed as commented
+#   out; uncomment it on Linux/CUDA if you want 4/8-bit quantization.
 
-# --- PyTorch (MPS on macOS, CUDA on Linux from default PyPI index) ---
-torch==2.11.0
-torchvision==0.26.0
+# Make the cu128 PyTorch wheels discoverable in addition to PyPI.
+# (Pip will only fetch +cu128 from this index because the local
+# version pin below cannot be satisfied by default PyPI.)
+--extra-index-url https://download.pytorch.org/whl/cu128
+
+# --- PyTorch ---
+# Linux/CUDA: cu128 wheels (RTX 5090 / Blackwell, driver >= 555).
+torch==2.11.0+cu128 ; sys_platform == 'linux'
+torchvision==0.26.0+cu128 ; sys_platform == 'linux'
+# macOS / Windows / other: default PyPI wheel (MPS-compatible on Apple Silicon).
+torch==2.11.0 ; sys_platform != 'linux'
+torchvision==0.26.0 ; sys_platform != 'linux'
 
 # --- HuggingFace stack ---
 transformers==4.46.3
